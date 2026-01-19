@@ -1,4 +1,4 @@
-name: VS Code (Cloudflare Tunnel)
+name: VS Code (Cloudflare Tunnel - Log Output)
 
 on:
   workflow_dispatch:
@@ -12,71 +12,77 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Random Password and Output to Log
+      - name: Generate Random Password
         id: generate_pass
         run: |
-          # 1. ランダムなパスワードを生成
+          # パスワード生成（マスクは行わず、そのままログに出力する）
           PASSWORD=$(openssl rand -base64 24)
           
-          # 2. 【重要】先にログに出力する（マスクより先に書くと表示される）
-          echo "=========================================="
-          echo "Generated Password: $PASSWORD"
-          echo "=========================================="
+          # ログへ直接出力（見やすく装飾）
+          echo ""
+          echo "------------------------------------------------"
+          echo "PASSWORD: $PASSWORD"
+          echo "------------------------------------------------"
+          echo ""
           
-          # 3. GitHubのマスク機能に登録（これ以降、ログ上は***と表示される）
-          echo "::add-mask::$PASSWORD"
-          
-          # 4. 出力変数にセット
-          echo "password=$PASSWORD" >> $GITHUB_OUTPUT
-
-      - name: Install VS Code (code-server)
-        run: |
-          docker run -d \
-            --name code-server \
-            -p 127.0.0.1:8080:8080 \
-            -v "${PWD}:/home/coder/project" \
-            -e PASSWORD="${{ steps.generate_pass.outputs.password }}" \
-            codercom/code-server:latest
+          # 環境変数へ保存
+          echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
 
       - name: Install Cloudflared
         run: |
           curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
 
-      - name: Start Cloudflare Tunnel
-        id: tunnel
+      - name: Start VS Code and Cloudflare Tunnel
         run: |
+          # --- VS Code 起動 ---
+          docker run -d \
+            --name code-server \
+            -p 127.0.0.1:8080:8080 \
+            -v "${PWD}:/home/coder/project" \
+            -e PASSWORD="${{ env.PASSWORD }}" \
+            codercom/code-server:latest
+
+          # --- Cloudflare Tunnel 起動 ---
           echo "Starting Cloudflare Tunnel..."
-          
-          # バックグラウンドで実行
           ./cloudflared tunnel --url http://127.0.0.1:8080 --loglevel info > /tmp/tunnel.log 2>&1 &
-          
-          # URLが出力されるまで待機（最大30秒）
-          for i in {1..30}; do
-            if grep -q "https://" /tmp/tunnel.log; then
+
+          # --- URL抽出ループ ---
+          # ログの中から trycloudflare.com が含まれる行を検索し、正しいURLを抽出する
+          echo "Waiting for Tunnel URL..."
+          for i in {1..60}; do
+            # 正規表現で https://...trycloudflare.com のみを抽出
+            URL=$(grep -oE "https://[^ ]+\.trycloudflare\.com" /tmp/tunnel.log | head -n 1)
+            
+            if [ -n "$URL" ]; then
+              # URLが見つかったら出力してループを抜ける
+              echo ""
+              echo "------------------------------------------------"
+              echo "ACCESS URL: $URL"
+              echo "------------------------------------------------"
+              echo ""
+              echo "Copy the URL and Password above to access VS Code."
               break
             fi
             sleep 1
           done
+
+          # URLが見つからなかった場合のエラーハンドリング
+          if [ -z "$URL" ]; then
+            echo "Failed to find Cloudflare URL. Dumping log:"
+            cat /tmp/tunnel.log
+            exit 1
+          fi
           
-          # ログからURLを抽出
-          URL=$(grep -m 1 "https://" /tmp/tunnel.log | awk '{print $NF}')
-          
-          # URLをログに表示
-          echo "=========================================="
-          echo "Access URL: $URL"
-          echo "=========================================="
-          
-          # 出力変数にセット
-          echo "access_url=$URL" >> $GITHUB_OUTPUT
+          # URLを環境変数にも保存（Summary用）
+          echo "URL=$URL" >> $GITHUB_ENV
 
       - name: Summary Info
-        if: steps.tunnel.outputs.access_url != ''
+        if: env.URL != ''
         run: |
           echo "### 🚀 Access Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**URL:** ${{ steps.tunnel.outputs.access_url }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Password:** ${{ steps.generate_pass.outputs.password }}" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ env.URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Password:** ${{ env.PASSWORD }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Keep Alive
         run: |
