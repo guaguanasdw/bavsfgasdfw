@@ -1,0 +1,99 @@
+name: VS Code (Cloudflare Tunnel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: '自動終了までの時間（分、最大360）'
+        required: true
+        default: '360'
+        type: string
+
+jobs:
+  setup-vscode:
+    runs-on: ubuntu-latest
+    
+    # GitHub Actionsの最大時間は360分
+    timeout-minutes: 360
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Random Password
+        id: generate_pass
+        run: |
+          # ランダムな32文字のパスワードを生成
+          PASSWORD=$(openssl rand -base64 24)
+          
+          # GitHub Secretsのマスキング機能を使って、以降のログでパスワードが見えないようにする
+          echo "::add-mask::$PASSWORD"
+          
+          # パスワードを出力変数にセット
+          echo "password=$PASSWORD" >> $GITHUB_OUTPUT
+          
+          echo "Generated Password successfully."
+
+      - name: Install VS Code (code-server)
+        run: |
+          docker run -d \
+            --name code-server \
+            -p 127.0.0.1:8080:8080 \
+            -v "${PWD}:/home/coder/project" \
+            -e PASSWORD="${{ steps.generate_pass.outputs.password }}" \
+            codercom/code-server:latest
+
+      - name: Install Cloudflared
+        run: |
+          # Cloudflaredの最新版をダウンロード
+          curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+
+      - name: Start Cloudflare Tunnel
+        id: tunnel
+        run: |
+          echo "Starting Cloudflare Tunnel..."
+          
+          # バックグラウンドでトンネルを実行し、ログをファイルに保存
+          ./cloudflared tunnel --url http://127.0.0.1:8080 --loglevel info > /tmp/tunnel.log 2>&1 &
+          
+          # URLが表示されるまで待機（最大30秒）
+          for i in {1..30}; do
+            if grep -q "https://" /tmp/tunnel.log; then
+              break
+            fi
+            sleep 1
+          done
+          
+          # ログからURLを抽出
+          URL=$(grep -m 1 "https://" /tmp/tunnel.log | awk '{print $NF}')
+          
+          # URLを確認
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Failed to retrieve Cloudflare Tunnel URL."
+            cat /tmp/tunnel.log
+            exit 1
+          fi
+          
+          # 出力変数にセット
+          echo "access_url=$URL" >> $GITHUB_OUTPUT
+          echo "Tunnel started successfully."
+
+      - name: Output Access Info
+        if: steps.tunnel.outputs.access_url != ''
+        run: |
+          echo "### 🚀 Access Your VS Code Environment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ steps.tunnel.outputs.access_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Password:** ${{ steps.generate_pass.outputs.password }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⏳ This workflow will automatically stop in ${{ inputs.keep_alive_minutes }} minutes (or click 'Cancel workflow')." >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep Alive
+        run: |
+          minutes=${{ inputs.keep_alive_minutes }}
+          echo "Environment is ready! Keeping the workflow alive for $minutes minutes."
+          echo "To stop immediately, cancel this workflow."
+          
+          # 指定した分の間だけスリープし続ける
+          sleep ${{ inputs.keep_alive_minutes }}m
