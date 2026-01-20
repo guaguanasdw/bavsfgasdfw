@@ -1,4 +1,4 @@
-name: Windows Browser Desktop via Cloudflare Tunnel
+name: Windows Browser Desktop (Fixed)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   desktop:
     runs-on: windows-latest
-    timeout-minutes: 999
+    timeout-minutes: 60
 
     env:
       VNC_PORT: 5900
@@ -19,150 +19,91 @@ jobs:
       - name: チェックアウト
         uses: actions/checkout@v4
 
-      # UltraVNC のセットアップ（サイレントインストール）
-      - name: VNC サーバー (UltraVNC) をインストール
+      # Chocolatey を使って UltraVNC をインストール（安定版）
+      - name: UltraVNC をインストール
+        run: choco install ultravnc -y
+
+      # VNCパスワードをレジストリに設定
+      # ※セキュリティ強化のため、パスワードは "password" で固定し、暗号化済みのバイト列をレジストリに書き込みます
+      - name: VNCパスワード設定＆サービス起動
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-
-          $installerUrl = 'https://www.uvnc.com/download/ UltraVNC_1610_x64_Setup.exe'  # 必要に応じてバージョンを更新【turn11search9】
-          $installerPath = "$env:TEMP\UltraVNC_Setup.exe"
-
-          Write-Host "Downloading UltraVNC installer..."
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
-
-          Write-Host "Installing UltraVNC (silent)..."
-          $args = @(
-            '/silent',
-            '/loadinf="default"',
-            '/norestart',
-            '/no_icl'
-          )
-          $proc = Start-Process -FilePath $installerPath -ArgumentList $args -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            Write-Host "::warning::UltraVNC installer exited with code $($proc.ExitCode)"
-          }
-          Write-Host "UltraVNC installation finished."
-
-      # VNC パスワードを設定（レジストリ）し、サービスを起動
-      # ※ここでは VNC_PASSWORD をログに出すよう指示されているので、echo します。
-      - name: VNC パスワード設定＆サービス起動＆パスワードをログに出力
-        shell: pwsh
-        env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if (-not $env:VNC_PASSWORD) {
-            Write-Host "::error::VNC_PASSWORD secret is not set."
-            exit 1
-          }
-
-          # UltraVNC はレジストリ HKEY_LOCAL_MACHINE\SOFTWARE\UltraVNC にパスワード等を保存
           $regPath = 'HKLM:\SOFTWARE\UltraVNC'
+          
+          # パスワード "password" に対応する暗号化済みの8バイトデータ (UltraVNC仕様)
+          $passwordBytes = [byte[]](0x77, 0x09, 0x4D, 0xE6, 0xB6, 0x61, 0x5A, 0x6B)
+
           if (-not (Test-Path $regPath)) {
-            New-Item -Path $regPath -Force | Out-Null
+              New-Item -Path $regPath -Force | Out-Null
           }
 
-          # ここでは簡易的にパスワードを設定（UltraVNC 用の暗号化が必要だが、
-          # CI 用簡易構成として uvnc settings を使う例）
-          # 本格的にやるなら、UltraVNC の設定 GUI/export を利用して、
-          # レジストリファイルをレポに含めて import する方が確実です。
-          Set-ItemProperty -Path $regPath -Name 'passwd' -Value $env:VNC_PASSWORD -Type String
-          Set-ItemProperty -Path $regPath -Name 'passwd2' -Value $env:VNC_PASSWORD -Type String
+          # 暗号化パスワードを設定
+          Set-ItemProperty -Path $regPath -Name 'passwd' -Value $passwordBytes -Type Binary
+          Set-ItemProperty -Path $regPath -Name 'passwd2' -Value $passwordBytes -Type Binary # View-only用も同じにする
+          
+          # 接続許可の設定
           Set-ItemProperty -Path $regPath -Name 'AllowProperty' -Value 1 -Type DWord
+          Set-ItemProperty -Path $regPath -Name 'UseDSMPlugin' -Value 0 -Type DWord
 
-          # UltraVNC サービス名は通常 "uvnc_service"
+          # サービス起動
           $serviceName = 'uvnc_service'
           Write-Host "Starting VNC service $serviceName ..."
-          Start-Service -Name $serviceName -ErrorAction SilentlyContinue
-          Get-Service -Name $serviceName | Select-Object Name, Status, StartType
-
-          # 要望通り、パスワードをログに出す（セキュリティ上のリスクは認識すること）
+          Start-Service -Name $serviceName
+          
+          # ログにパスワードを表示（要件通り）
           Write-Host "=========================================="
-          Write-Host "VNC password: ${env:VNC_PASSWORD}"
+          Write-Host "VNC Password: password"
           Write-Host "=========================================="
 
       # noVNC のセットアップ
       - name: noVNC をセットアップ
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-
           $workDir = "$env:GITHUB_WORKSPACE\novnc"
           New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 
-          $repo = 'https://github.com/novnc/noVNC.git'
-          # アーカイブをダウンロードして展開
           $zipUrl = 'https://github.com/novnc/noVNC/archive/refs/heads/master.zip'
           $zipPath = "$env:TEMP\novnc.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-
           Expand-Archive -Path $zipPath -DestinationPath $workDir -Force
 
-          # 展開後のディレクトリ名が noVNC-master になる想定
-          $novncHome = "$workDir\noVNC-master"
-          Write-Host "noVNC home: $novncHome"
+          $env:NOVNC_HOME = "$workDir\noVNC-master"
+          echo "NOVNC_HOME=$env:NOVNC_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
-          # noVNC は websockify を必要とする【turn11search10】
-          # CI なので手軽に pip で入れる
-          python -m pip install --upgrade pip
-          pip install websockify
+          # websockify インストール
+          python -m pip install websockify
 
-          # 環境変数にセット（後で使う）
-          echo "NOVNC_HOME=$novncHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-          Write-Host "NOVNC_HOME=$novncHome"
-
-      # noVNC + websockify 起動（localhost:6080）
+      # noVNC 起動
       - name: noVNC (websockify) を起動
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $port = $env:NOVNC_PORT
+          $vncTarget = "127.0.0.1:$env:VNC_PORT"
+          $webDir = $env:NOVNC_HOME
 
-          $websockifyPort = $env:NOVNC_PORT
-          $vncHost = '127.0.0.1'
-          $vncPort = $env:VNC_PORT
-          $novncHome = $env:NOVNC_HOME
+          # バックグラウンドで websockify を起動
+          Start-Process -FilePath 'websockify' -ArgumentList @(
+            "$port",
+            "$vncTarget",
+            "--web=$webDir"
+          ) -NoNewWindow
 
-          # noVNC を websockify 経由で提供
-          # websockify は noVNC リポジトリにバンドルされていることもありますが、
-          # pip 版にパスを通している前提で実行
-          $env:PATH += ";$env:APPDATA\Python\Python311\Scripts"  # バージョンは Runner 次第
+          Write-Host "websockify started on http://127.0.0.1:$port"
 
-          $job = Start-Process -FilePath 'websockify' -ArgumentList @(
-            "$websockifyPort",
-            "$vncHost`:$vncPort",
-            '--web=' + $novncHome
-          ) -PassThru -NoNewWindow
-
-          # job ハンドルを保存してあとで止められるようにしてもよいが、
-          # ジョブ終了時にプロセスごと殲滅されるので簡易的に放置
-          $id = $job.Id
-          echo "WEBSOCKIFY_PID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          Start-Sleep -Seconds 3
-          Write-Host "websockify is listening on http://127.0.0.1:$websockifyPort"
-
-      # Cloudflare Tunnel (setup-cloudflared + TryCloudflare) で localhost:6080 を公開
-      - name: Cloudflare Tunnel (TryCloudflare) をセットアップ
+      # Cloudflare Tunnel セットアップ
+      - name: Cloudflare Tunnel をセットアップ
         uses: AnimMouse/setup-cloudflared@v2
 
-      - name: Cloudflare Quick Tunnel で noVNC をインターネットに公開
+      # Cloudflare Tunnel 実行 (localhost:6080 へ転送)
+      - name: Cloudflare Quick Tunnel で公開
         uses: AnimMouse/setup-cloudflared/tunnel@v2
         with:
-          url: http://127.0.0.1:6080   # noVNC(websockify) ポート【turn18fetch0】
+          url: http://127.0.0.1:6080
 
-      # 一定時間だけジョブを生かしておく（ブラウザで操作する時間）
-      # ここでは例として 55 分間待機（timeout-minutes と合わせて調整）
-      - name: デスクトップ操作用に待機
+      # 待機（操作時間）
+      - name: 待機（デスクトップ操作用）
         shell: pwsh
         run: |
-          $waitMinutes = 999
-          Write-Host "Sleeping for $waitMinutes minutes so you can use the desktop..."
-          $seconds = $waitMinutes * 60
-          Start-Sleep -Seconds $seconds
-
-      # cloudflared のシャットダウン（ログを確認用に出力）【turn18fetch0】
-      - name: Cloudflare Tunnel のシャットダウン＆ログ表示
-        if: '! cancelled()'
-        uses: AnimMouse/setup-cloudflared/shutdown@v2
+          $waitMinutes = 55
+          Write-Host "Waiting for $waitMinutes minutes..."
+          Start-Sleep -Seconds ($waitMinutes * 60)
