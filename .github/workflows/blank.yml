@@ -1,4 +1,4 @@
-name: Expose Windows to Browser
+name: Expose Windows Environment via Cloudflare Tunnel
 
 on:
   push:
@@ -6,52 +6,42 @@ on:
       - main
 
 jobs:
-  expose-windows:
+  setup_and_expose:
     runs-on: windows-latest
-
+    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      # 必要なツールのインストール
+      - name: Set up cloudflared
+        run: |
+          Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile $env:ProgramFiles\cloudflared.exe
 
-    - name: Set up Cloudflare Tunnel
-      run: |
-        # Cloudflare Tunnelのインストール
-        Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
-        Rename-Item cloudflared.exe cloudflared
-        # cloudflaredを実行するために必要な環境変数
-        $Env:CLOUDFLARE_TUNNEL_SECRET = $env:CLOUDFLARE_TUNNEL_SECRET
-        ./cloudflared.exe --version
+      # Cloudflare API トークンを GitHub Secrets から取得
+      - name: Authenticate with Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          cloudflared --no-autoupdate login $env:CLOUDFLARE_API_TOKEN
+          
+      # Cloudflare Tunnelの作成（トンネルの名前は適宜変更可能）
+      - name: Create Tunnel
+        run: |
+          $tunnelName = "github-actions-tunnel"
+          cloudflared tunnel create $tunnelName
+          
+      # Cloudflare Tunnelを設定
+      - name: Configure Tunnel
+        run: |
+          $tunnelName = "github-actions-tunnel"
+          cloudflared tunnel route dns $tunnelName example.com # 公開するドメイン名を指定する
 
-    - name: Start VNC Server
-      run: |
-        # VNCサーバーをインストールして起動
-        choco install tightvnc
-        Start-Process -NoNewWindow -FilePath "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-run"
+      # Windows 環境のポートを公開
+      - name: Expose Windows Service via Cloudflare Tunnel
+        run: |
+          $tunnelName = "github-actions-tunnel"
+          cloudflared tunnel run $tunnelName --url http://localhost:8080 # 8080は公開するWindowsサービスのポート番号
 
-    - name: Expose via Cloudflare Tunnel
-      run: |
-        # Cloudflare Tunnelの設定を開始
-        echo "Starting Cloudflare Tunnel"
-        cloudflared tunnel --url vnc://localhost:5900 &
-        # クラウドフレアトンネルをブラウザ上でアクセスできるようにする
-        sleep 10  # Tunnelが安定するまで待機
-
-    - name: Output Tunnel URL and VNC Password
-      run: |
-        # ここでパスワードを表示する
-        $vncPassword = "your-secure-password"
-        Write-Host "VNC Server is running on : vnc://localhost:5900"
-        Write-Host "Cloudflare Tunnel URL: https://your-cloudflare-tunnel-url"
-        Write-Host "VNC Password: $vncPassword"
-
-    - name: Expose noVNC Web Interface
-      run: |
-        # noVNCをセットアップしてブラウザからVNCにアクセス可能にする
-        choco install novnc
-        cd "C:\Program Files\novnc"
-        Start-Process -NoNewWindow -FilePath "C:\Program Files\novnc\start.bat" -ArgumentList "localhost:5900"
-        
-    - name: Keep the Action Alive
-      run: |
-        # 永続的にプロセスを維持
-        while ($true) { Start-Sleep -Seconds 3600 }
+      # パスワードをログに出力（セキュリティ上、実際の使用には注意）
+      - name: Output password to logs
+        run: |
+          $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          Write-Host "Generated password: $password"
