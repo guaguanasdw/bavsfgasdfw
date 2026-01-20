@@ -1,4 +1,4 @@
-name: Windows Browser Desktop (Long Life & Clear URL)
+name: Windows Browser Desktop (Fixed Quotes & Long Life)
 
 on:
   workflow_dispatch:
@@ -99,6 +99,7 @@ jobs:
         uses: AnimMouse/setup-cloudflared@v2
 
       # Cloudflare Tunnel 手動起動 & URL抽出＆巨大表示
+      # ※文字列エラーを防ぐため、単一引用符 ' を使用し、変数は -f で埋め込む形式に変更
       - name: Cloudflare Tunnel 起動 & URLを表示
         shell: pwsh
         run: |
@@ -106,47 +107,47 @@ jobs:
           
           # バックグラウンドで cloudflared を起動し、ログをファイルに吐かせる
           $logFile = "$env:TEMP\cf-tunnel.log"
-          Start-Process -FilePath "cloudflared" -ArgumentList "tunnel --url http://127.0.0.1:6080" -RedirectStandardOutput $logFile -RedirectStandardError $logFile -NoNewWindow
+          Start-Process -FilePath 'cloudflared' -ArgumentList 'tunnel --url http://127.0.0.1:6080' -RedirectStandardOutput $logFile -RedirectStandardError $logFile -NoNewWindow
 
           # URLが出力されるまで最大15秒待機
-          Write-Host "Waiting for Cloudflare Tunnel URL..."
+          Write-Host 'Waiting for Cloudflare Tunnel URL...'
           $maxWait = 15
           $url = $null
           for ($i = 0; $i -lt $maxWait; $i++) {
               Start-Sleep -Seconds 1
               $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-              if ($content -match "https://[a-zA-Z0-9\-\.]+trycloudflare\.com") {
+              if ($content -match 'https://[a-zA-Z0-9\-\.]+trycloudflare\.com') {
                   $url = $matches[0]
                   break
               }
           }
 
           if ($url) {
-              # 見やすいように巨大に表示
-              Write-Host ""
-              Write-Host "###########################################################################" -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "#   ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★   " -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "#   Windows デスクトップへの接続情報 (Connection Info)                   #" -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "#   接続URL (URL) :                                                       #" -ForegroundColor Green
-              Write-Host "#   $url                                                               #" -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "#   パスワード (Password) :                                                 #" -ForegroundColor Green
-              Write-Host "#   password                                                                #" -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "#   ※ 上記のURLをクリックするとブラウザで操作できます                      #" -ForegroundColor Green
-              Write-Host "#                                                                         #" -ForegroundColor Green
-              Write-Host "###########################################################################" -ForegroundColor Green
-              Write-Host ""
+              # 見やすいように巨大に表示（引用符エラー回避のため単一引用符と-f演算子を使用）
+              Write-Host ''
+              Write-Host '###########################################################################' -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host '#   ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★   ' -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host '#   Windows デスクトップへの接続情報                                       #' -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host ('#   接続URL (URL) : {0}                                                       #' -f $url) -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host '#   パスワード (Password) :                                                 #' -ForegroundColor Green
+              Write-Host '#   password                                                                #' -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host '#   ※ 上記のURLをクリックするとブラウザで操作できます                      #' -ForegroundColor Green
+              Write-Host '#                                                                         #' -ForegroundColor Green
+              Write-Host '###########################################################################' -ForegroundColor Green
+              Write-Host ''
               
-              # Job Summaryにも表示（GitHubの画面トップに出る）
-              echo "### 🖥️ Windows Remote Desktop" >> $env:GITHUB_STEP_SUMMARY
-              echo "**URL:** $url" >> $env:GITHUB_STEP_SUMMARY
-              echo "**Password:** \`password\`" >> $env:GITHUB_STEP_SUMMARY
+              # Job Summaryにも表示
+              echo '### 🖥️ Windows Remote Desktop' >> $env:GITHUB_STEP_SUMMARY
+              echo ('**URL:** {0}' -f $url) >> $env:GITHUB_STEP_SUMMARY
+              echo '**Password:** `password`' >> $env:GITHUB_STEP_SUMMARY
           } else {
-              Write-Host "::error::Cloudflare Tunnel URLの取得に失敗しました。ログを確認してください。"
+              # エラーメッセージも単一引用符で囲む
+              Write-Host '::error::Cloudflare Tunnel URLの取得に失敗しました。ログを確認してください。'
               Get-Content $logFile | Write-Host
           }
 
@@ -154,19 +155,18 @@ jobs:
       - name: 環境維持（最大6時間まで待機）
         shell: pwsh
         run: |
-          # タイムアウト設定（ジョブのtimeout-minutesより少し短くしておく安全策）
           $totalMinutes = 350
-          $checkInterval = 10 # 10分ごとにログを出す
+          $checkInterval = 10 
           
-          Write-Host "============================================================"
-          Write-Host "  環境を $totalMinutes 分間（約6時間）維持します..."
-          Write-Host "  上記のURLからアクセスしてください。"
-          Write-Host "============================================================"
+          Write-Host '============================================================'
+          Write-Host ('  環境を {0} 分間（約6時間）維持します...' -f $totalMinutes)
+          Write-Host '  上記のURLからアクセスしてください。'
+          Write-Host '============================================================'
 
           $elapsed = 0
           while ($elapsed -lt $totalMinutes) {
               Start-Sleep -Seconds ($checkInterval * 60)
               $elapsed += $checkInterval
               $remaining = $totalMinutes - $elapsed
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 環境維持中... 残り約 $remaining 分"
+              Write-Host ('[{0}] 環境維持中... 残り約 {1} 分' -f (Get-Date -Format 'HH:mm:ss'), $remaining)
           }
