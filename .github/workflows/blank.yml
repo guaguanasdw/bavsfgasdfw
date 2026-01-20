@@ -21,14 +21,17 @@ jobs:
       - name: Write Tunnel Credentials
         run: |
           mkdir $env:USERPROFILE\.cloudflared
+          # credentialファイルのデコード
           echo $env:CLOUDFLARE_TUNNEL_CREDENTIAL_BASE64 | Out-File cred.b64
           certutil -decode cred.b64 "$env:USERPROFILE\.cloudflared\tunnel.json"
+
+          # config.ymlのデコード
           echo $env:CLOUDFLARE_TUNNEL_CONFIGURATION_BASE64 | Out-File cfg.b64
           certutil -decode cfg.b64 "$env:USERPROFILE\.cloudflared\config.yml"
           
-          # config.yml の内容を表示してデバッグ
-          Get-Content "$env:USERPROFILE\.cloudflared\config.yml"
-        
+          # config.ymlの中身を出力してデバッグ
+          Get-Content "$env:USERPROFILE\.cloudflared\config.yml" # これで内容が出力されるか確認します
+          
         env:
           CLOUDFLARE_TUNNEL_CREDENTIAL_BASE64: ${{ secrets.CLOUDFLARE_TUNNEL_CREDENTIAL }}
           CLOUDFLARE_TUNNEL_CONFIGURATION_BASE64: ${{ secrets.CLOUDFLARE_TUNNEL_CONFIGURATION }}
