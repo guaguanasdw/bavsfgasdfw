@@ -10,11 +10,12 @@ jobs:
     runs-on: windows-latest
     
     steps:
-      # 必要なツールのインストール
-      - name: Set up cloudflared
+      # cloudflaredのインストール
+      - name: Install cloudflared
         run: |
           Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile $env:ProgramFiles\cloudflared.exe
-
+          $env:Path += ";$env:ProgramFiles"
+      
       # Cloudflare API トークンを GitHub Secrets から取得
       - name: Authenticate with Cloudflare
         env:
