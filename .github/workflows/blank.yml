@@ -1,4 +1,4 @@
-name: Windows Browser Desktop via Cloudflare Tunnel (Fixed)
+name: Windows Browser Desktop via Cloudflare Tunnel (Final Fixed)
 
 on:
   workflow_dispatch:
@@ -19,29 +19,28 @@ jobs:
       - name: チェックアウト
         uses: actions/checkout@v4
 
-      # Chocolatey で UltraVNC をインストール
-      # サイレントインストールのみで、サービス登録はされない【turn3fetch0】
       - name: UltraVNC をインストール
         run: choco install ultravnc -y
 
       # パスワード設定のために createpassword ツールをダウンロード
-      # 公式: createpassword [-secure] mypassword （ultravnc.ini フォルダで実行）【turn6search6】
       - name: createpassword ツールを取得・展開
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
           $zipUrl = 'https://uvnc.eu/download/133/createpassword.zip'
           $zipPath = "$env:TEMP\createpassword.zip"
-          $destDir   = "${env:ProgramFiles}\UltraVNC"
-
+          
+          # インストール先の特定 (uvnc bvba サブフォルダがあるか確認)
+          $uvncDir = "${env:ProgramFiles}\uvnc bvba\UltraVNC"
+          if (-not (Test-Path $uvncDir)) {
+              $uvncDir = "${env:ProgramFiles}\UltraVNC"
+          }
+          
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath $destDir -Force
-
-          Write-Host "createpassword expanded to $destDir"
+          Expand-Archive -Path $zipPath -DestinationPath $uvncDir -Force
+          echo "UVNC_DIR=$uvncDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
       # UltraVNC をアプリモードで起動＋パスワード設定
-      # パスワードは createpassword で ultravnc.ini に書き込む【turn6search6】
       - name: UltraVNC (winvnc.exe) をアプリモードで起動＆パスワード設定＆ログ出力
         shell: pwsh
         env:
@@ -49,107 +48,76 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if (-not $env:VNC_PASSWORD) {
-            Write-Host "::error::VNC_PASSWORD secret is not set."
-            exit 1
-          }
+          # パスワードが設定されていない場合はデフォルト値を使用
+          $vncPass = if ($env:VNC_PASSWORD) { $env:VNC_PASSWORD } else { "password" }
 
-          $uvncDir = "${env:ProgramFiles}\UltraVNC"
+          # 環境変数からインストールディレクトリを取得 (前のステップで設定したもの)
+          $uvncDir = $env:UVNC_DIR
           $createpassword = "$uvncDir\createpassword.exe"
           $winvnc = "$uvncDir\winvnc.exe"
           $iniFile = "$uvncDir\ultravnc.ini"
 
-          # 必要に応じて ultravnc.ini を空作成（createpassword が上書きするため）
-          if (-not (Test-Path $iniFile)) {
-            New-Item -Path $iniFile -ItemType File -Force | Out-Null
+          if (-not (Test-Path $createpassword)) {
+              Write-Host "::error::createpassword.exe not found at $createpassword"
+              exit 1
           }
 
-          # 公式に従い、ultravnc.ini のあるフォルダで createpassword を実行【turn6search6】
+          # ultravnc.ini のあるフォルダで createpassword を実行
           Push-Location $uvncDir
           try {
-            & $createpassword $env:VNC_PASSWORD
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::warning::createpassword exited with code $LASTEXITCODE"
-            }
+            & $createpassword $vncPass
           }
           finally {
             Pop-Location
           }
 
-          # ultravnc.ini が生成されたことをログ出力（確認用）
-          Get-Content $iniFile | Out-String | Write-Host
-
-          # winvnc.exe をアプリモードで起動（-run）【turn5search3】
+          # winvnc.exe をアプリモードで起動（-run）
           $proc = Start-Process -FilePath $winvnc -ArgumentList '-run' -PassThru
-          $id = $proc.Id
-          echo "WINVNC_PID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "WINVNC_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
-          # 要件通り、パスワードをログに出力
+          # パスワードをログに出力
           Write-Host "=========================================="
-          Write-Host "VNC Password: ${env:VNC_PASSWORD}"
+          Write-Host "VNC Password: $vncPass"
           Write-Host "=========================================="
-          Write-Host "UltraVNC (winvnc.exe) started (PID=$id)."
+          Write-Host "UltraVNC started from $uvncDir"
 
       # noVNC ＋ websockify のセットアップ
-      # noVNC は VNC → WebSocket をブリッジする websockify と一緒に使う【turn5search8】【turn0search10】
       - name: noVNC をセットアップ
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
           $workDir = "$env:GITHUB_WORKSPACE\novnc"
           New-Item -ItemType Directory -Force -Path $workDir | Out-Null
-
           $zipUrl = 'https://github.com/novnc/noVNC/archive/refs/heads/master.zip'
           $zipPath = "$env:TEMP\novnc.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
           Expand-Archive -Path $zipPath -DestinationPath $workDir -Force
+          echo "NOVNC_HOME=$workDir\noVNC-master" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          python -m pip install websockify
 
-          $env:NOVNC_HOME = "$workDir\noVNC-master"
-          echo "NOVNC_HOME=$env:NOVNC_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          # websockify をインストール【turn0search10】
-          python -m pip install --upgrade pip
-          pip install websockify
-
-      # websockify 経由で noVNC を localhost:6080 に公開
+      # websockify 起動
       - name: noVNC (websockify) を起動
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-
           $port = $env:NOVNC_PORT
           $vncTarget = "127.0.0.1:$env:VNC_PORT"
           $webDir = $env:NOVNC_HOME
+          Start-Process -FilePath 'websockify' -ArgumentList @("$port", "$vncTarget", "--web=$webDir") -NoNewWindow
+          Write-Host "websockify started on http://127.0.0.1:$port"
 
-          # バックグラウンドで websockify 起動
-          $job = Start-Process -FilePath 'websockify' -ArgumentList @(
-            "$port",
-            "$vncTarget",
-            "--web=$webDir"
-          ) -PassThru -NoNewWindow
-
-          $id = $job.Id
-          echo "WEBSOCKIFY_PID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          Write-Host "websockify started on http://127.0.0.1:$port (PID=$id)"
-
-      # Cloudflare Tunnel (TryCloudflare) をセットアップ
-      # setup-cloudflared アクションで cloudflared をインストール【turn0search11】【turn0search15】
+      # Cloudflare Tunnel
       - name: Cloudflare Tunnel (setup-cloudflared) をセットアップ
         uses: AnimMouse/setup-cloudflared@v2
 
-      # noVNC のポート (6080) を Quick Tunnel で公開【turn0search16】【turn0search14】
-      - name: Cloudflare Quick Tunnel で noVNC をインターネットに公開
+      - name: Cloudflare Quick Tunnel で公開
         uses: AnimMouse/setup-cloudflared/tunnel@v2
         with:
           url: http://127.0.0.1:6080
 
-      # 操作用の時間を稼ぐため待機
+      # 待機
       - name: デスクトップ操作用に待機
         shell: pwsh
         run: |
           $waitMinutes = 55
-          Write-Host "Sleeping for $waitMinutes minutes so you can use the desktop..."
-          $seconds = $waitMinutes * 60
-          Start-Sleep -Seconds $seconds
+          Write-Host "Waiting for $waitMinutes minutes..."
+          Start-Sleep -Seconds ($waitMinutes * 60)
