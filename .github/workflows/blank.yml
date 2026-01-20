@@ -1,90 +1,53 @@
-name: VS Code (Cloudflare Tunnel - Log Output)
+name: Windows RDP (Cloudflare Tunnel)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手動実行のみ
 
 jobs:
-  setup-vscode:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360 # 最大6時間
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # RDPの有効化とパスワード設定
+    - name: Setup RDP
+      run: |
+        # パスワードを固定値に設定（ログに出力するため）
+        $password = "P@ssw0rd123"
+        
+        # パスワードを目立つようにログに出力
+        Write-Host "================================================"
+        Write-Host "PASSWORD: $password"
+        Write-Host "================================================"
+        
+        # runneradminユーザーのパスワードを変更
+        net user runneradmin $password
+        
+        # NLA（ネットワークレベル認証）を無効化（接続を安定させるため）
+        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
+        
+        # RDP自体を有効化
+        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+        
+        # ファイアウォールで3389番を許可
+        netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+        
+        # 接続確認用メッセージ
+        Write-Host "RDP Enabled. Waiting for Cloudflare Tunnel..."
 
-      - name: Generate Random Password
-        id: generate_pass
-        run: |
-          # パスワード生成（マスクは行わず、そのままログに出力する）
-          PASSWORD=$(openssl rand -base64 24)
-          
-          # ログへ直接出力（見やすく装飾）
-          echo ""
-          echo "------------------------------------------------"
-          echo "PASSWORD: $PASSWORD"
-          echo "------------------------------------------------"
-          echo ""
-          
-          # 環境変数へ保存
-          echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+    # Cloudflaredのダウンロード
+    - name: Download Cloudflared
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
 
-      - name: Install Cloudflared
-        run: |
-          curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
+    # Cloudflare Tunnelの起動 (trycloudflare)
+    - name: Start Cloudflare Tunnel
+      run: |
+        # trycloudflare機能を使って認証なしでTCPトンネルを張る
+        # ログにURLが表示される
+        .\cloudflared.exe tunnel --url tcp://localhost:3389
 
-      - name: Start VS Code and Cloudflare Tunnel
-        run: |
-          # --- VS Code 起動 ---
-          docker run -d \
-            --name code-server \
-            -p 127.0.0.1:8080:8080 \
-            -v "${PWD}:/home/coder/project" \
-            -e PASSWORD="${{ env.PASSWORD }}" \
-            codercom/code-server:latest
-
-          # --- Cloudflare Tunnel 起動 ---
-          echo "Starting Cloudflare Tunnel..."
-          ./cloudflared tunnel --url http://127.0.0.1:8080 --loglevel info > /tmp/tunnel.log 2>&1 &
-
-          # --- URL抽出ループ ---
-          # ログの中から trycloudflare.com が含まれる行を検索し、正しいURLを抽出する
-          echo "Waiting for Tunnel URL..."
-          for i in {1..60}; do
-            # 正規表現で https://...trycloudflare.com のみを抽出
-            URL=$(grep -oE "https://[^ ]+\.trycloudflare\.com" /tmp/tunnel.log | head -n 1)
-            
-            if [ -n "$URL" ]; then
-              # URLが見つかったら出力してループを抜ける
-              echo ""
-              echo "------------------------------------------------"
-              echo "ACCESS URL: $URL"
-              echo "------------------------------------------------"
-              echo ""
-              echo "Copy the URL and Password above to access VS Code."
-              break
-            fi
-            sleep 1
-          done
-
-          # URLが見つからなかった場合のエラーハンドリング
-          if [ -z "$URL" ]; then
-            echo "Failed to find Cloudflare URL. Dumping log:"
-            cat /tmp/tunnel.log
-            exit 1
-          fi
-          
-          # URLを環境変数にも保存（Summary用）
-          echo "URL=$URL" >> $GITHUB_ENV
-
-      - name: Summary Info
-        if: env.URL != ''
-        run: |
-          echo "### 🚀 Access Information" >> $GITHUB_STEP_SUMMARY
-          echo "**URL:** ${{ env.URL }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Password:** ${{ env.PASSWORD }}" >> $GITHUB_STEP_SUMMARY
-
-      - name: Keep Alive
-        run: |
-          echo "Workflow is running. Click 'Cancel workflow' to stop."
-          sleep 360m
+    # このステップには到達しませんが、ジョブが終了しないように念のため記述
+    - name: Keep Alive
+      if: false
+      run: while ($true) { Start-Sleep -Seconds 3600 }
