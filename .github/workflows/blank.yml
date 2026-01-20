@@ -1,53 +1,61 @@
-name: Windows RDP (Cloudflare Tunnel)
+name: Windows Web RDP (Browser Access)
 
 on:
   workflow_dispatch: # 手動実行のみ
 
 jobs:
-  rdp:
+  web_rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # 最大6時間
+    timeout-minutes: 360
 
     steps:
-    # RDPの有効化とパスワード設定
-    - name: Setup RDP
+    # WindowsホストでRDP有効化
+    - name: Setup Host RDP
       run: |
-        # パスワードを固定値に設定（ログに出力するため）
+        # パスワード設定とログ出力
         $password = "P@ssw0rd123"
-        
-        # パスワードを目立つようにログに出力
         Write-Host "================================================"
-        Write-Host "PASSWORD: $password"
+        Write-Host "WINDOWS PASSWORD: $password"
         Write-Host "================================================"
         
-        # runneradminユーザーのパスワードを変更
+        # ユーザー設定
         net user runneradmin $password
-        
-        # NLA（ネットワークレベル認証）を無効化（接続を安定させるため）
+        # NLA無効化（ブラウザ経由の接続を安定させるため）
         reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-        
-        # RDP自体を有効化
+        # RDP許可
         reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-        
-        # ファイアウォールで3389番を許可
+        # FW許可
         netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-        
-        # 接続確認用メッセージ
-        Write-Host "RDP Enabled. Waiting for Cloudflare Tunnel..."
 
-    # Cloudflaredのダウンロード
-    - name: Download Cloudflared
+    # Guacamoleの起動
+    - name: Start Guacamole (Web RDP)
       run: |
-        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        # GitHub ActionsのWindows RunnerはデフォルトでLinuxコンテナが動作するようDocker Desktop設定がされている場合がありますが、
+        # 念のためSwitchコマンドでLinuxコンテナモードに強制切り替えします
+        & "C:\Program Files\Docker\Docker\DockerCli.exe" -SwitchLinuxEngine
+        
+        # Dockerイメージのプル（初回は時間がかかります）
+        docker pull oznu/guacamole
+        
+        # Guacamoleコンテナ起動
+        # ポート8080でWebインターフェースを公開
+        # ユーザー名: guacadmin / パスワード: guacadmin (デフォルト)
+        docker run -d --name guacamole -p 8080:8080 oznu/guacamole
 
-    # Cloudflare Tunnelの起動 (trycloudflare)
+    # Cloudflaredのダウンロードと実行
     - name: Start Cloudflare Tunnel
       run: |
-        # trycloudflare機能を使って認証なしでTCPトンネルを張る
-        # ログにURLが表示される
-        .\cloudflared.exe tunnel --url tcp://localhost:3389
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        
+        Write-Host "================================================"
+        Write-Host "Starting Cloudflare Tunnel..."
+        Write-Host "Access the URL below in your browser:"
+        Write-Host "================================================"
+        
+        # Guacamoleのポート8080をインターネットに公開
+        .\cloudflared.exe tunnel --url http://localhost:8080
 
-    # このステップには到達しませんが、ジョブが終了しないように念のため記述
+    # 終了防止
     - name: Keep Alive
       if: false
       run: while ($true) { Start-Sleep -Seconds 3600 }
