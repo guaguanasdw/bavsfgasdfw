@@ -1,4 +1,4 @@
-name: Windows Browser Desktop via Cloudflare Tunnel (Final Fixed)
+name: Windows Browser Desktop (Long Life & Clear URL)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,8 @@ permissions:
 jobs:
   desktop:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 最大6時間まで維持
+    timeout-minutes: 360
 
     env:
       VNC_PORT: 5900
@@ -30,7 +31,7 @@ jobs:
           $zipUrl = 'https://uvnc.eu/download/133/createpassword.zip'
           $zipPath = "$env:TEMP\createpassword.zip"
           
-          # インストール先の特定 (uvnc bvba サブフォルダがあるか確認)
+          # インストール先の特定
           $uvncDir = "${env:ProgramFiles}\uvnc bvba\UltraVNC"
           if (-not (Test-Path $uvncDir)) {
               $uvncDir = "${env:ProgramFiles}\UltraVNC"
@@ -40,27 +41,20 @@ jobs:
           Expand-Archive -Path $zipPath -DestinationPath $uvncDir -Force
           echo "UVNC_DIR=$uvncDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
-      # UltraVNC をアプリモードで起動＋パスワード設定
-      - name: UltraVNC (winvnc.exe) をアプリモードで起動＆パスワード設定＆ログ出力
+      # UltraVNC をアプリモードで起動
+      - name: UltraVNC 起動＆パスワード設定
         shell: pwsh
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # パスワードが設定されていない場合はデフォルト値を使用
+          # パスワードが未設定なら "password" を使用
           $vncPass = if ($env:VNC_PASSWORD) { $env:VNC_PASSWORD } else { "password" }
 
-          # 環境変数からインストールディレクトリを取得 (前のステップで設定したもの)
           $uvncDir = $env:UVNC_DIR
           $createpassword = "$uvncDir\createpassword.exe"
           $winvnc = "$uvncDir\winvnc.exe"
-          $iniFile = "$uvncDir\ultravnc.ini"
-
-          if (-not (Test-Path $createpassword)) {
-              Write-Host "::error::createpassword.exe not found at $createpassword"
-              exit 1
-          }
 
           # ultravnc.ini のあるフォルダで createpassword を実行
           Push-Location $uvncDir
@@ -74,12 +68,7 @@ jobs:
           # winvnc.exe をアプリモードで起動（-run）
           $proc = Start-Process -FilePath $winvnc -ArgumentList '-run' -PassThru
           echo "WINVNC_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-
-          # パスワードをログに出力
-          Write-Host "=========================================="
-          Write-Host "VNC Password: $vncPass"
-          Write-Host "=========================================="
-          Write-Host "UltraVNC started from $uvncDir"
+          Write-Host "UltraVNC started. Password: $vncPass"
 
       # noVNC ＋ websockify のセットアップ
       - name: noVNC をセットアップ
@@ -105,19 +94,79 @@ jobs:
           Start-Process -FilePath 'websockify' -ArgumentList @("$port", "$vncTarget", "--web=$webDir") -NoNewWindow
           Write-Host "websockify started on http://127.0.0.1:$port"
 
-      # Cloudflare Tunnel
-      - name: Cloudflare Tunnel (setup-cloudflared) をセットアップ
+      # Cloudflare Tunnel バイナリのセットアップ
+      - name: Cloudflare Tunnel バイナリを準備
         uses: AnimMouse/setup-cloudflared@v2
 
-      - name: Cloudflare Quick Tunnel で公開
-        uses: AnimMouse/setup-cloudflared/tunnel@v2
-        with:
-          url: http://127.0.0.1:6080
-
-      # 待機
-      - name: デスクトップ操作用に待機
+      # Cloudflare Tunnel 手動起動 & URL抽出＆巨大表示
+      - name: Cloudflare Tunnel 起動 & URLを表示
         shell: pwsh
         run: |
-          $waitMinutes = 55
-          Write-Host "Waiting for $waitMinutes minutes..."
-          Start-Sleep -Seconds ($waitMinutes * 60)
+          $ErrorActionPreference = 'Stop'
+          
+          # バックグラウンドで cloudflared を起動し、ログをファイルに吐かせる
+          $logFile = "$env:TEMP\cf-tunnel.log"
+          Start-Process -FilePath "cloudflared" -ArgumentList "tunnel --url http://127.0.0.1:6080" -RedirectStandardOutput $logFile -RedirectStandardError $logFile -NoNewWindow
+
+          # URLが出力されるまで最大15秒待機
+          Write-Host "Waiting for Cloudflare Tunnel URL..."
+          $maxWait = 15
+          $url = $null
+          for ($i = 0; $i -lt $maxWait; $i++) {
+              Start-Sleep -Seconds 1
+              $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+              if ($content -match "https://[a-zA-Z0-9\-\.]+trycloudflare\.com") {
+                  $url = $matches[0]
+                  break
+              }
+          }
+
+          if ($url) {
+              # 見やすいように巨大に表示
+              Write-Host ""
+              Write-Host "###########################################################################" -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "#   ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★   " -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "#   Windows デスクトップへの接続情報 (Connection Info)                   #" -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "#   接続URL (URL) :                                                       #" -ForegroundColor Green
+              Write-Host "#   $url                                                               #" -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "#   パスワード (Password) :                                                 #" -ForegroundColor Green
+              Write-Host "#   password                                                                #" -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "#   ※ 上記のURLをクリックするとブラウザで操作できます                      #" -ForegroundColor Green
+              Write-Host "#                                                                         #" -ForegroundColor Green
+              Write-Host "###########################################################################" -ForegroundColor Green
+              Write-Host ""
+              
+              # Job Summaryにも表示（GitHubの画面トップに出る）
+              echo "### 🖥️ Windows Remote Desktop" >> $env:GITHUB_STEP_SUMMARY
+              echo "**URL:** $url" >> $env:GITHUB_STEP_SUMMARY
+              echo "**Password:** \`password\`" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+              Write-Host "::error::Cloudflare Tunnel URLの取得に失敗しました。ログを確認してください。"
+              Get-Content $logFile | Write-Host
+          }
+
+      # 長時間維持のための待機ループ
+      - name: 環境維持（最大6時間まで待機）
+        shell: pwsh
+        run: |
+          # タイムアウト設定（ジョブのtimeout-minutesより少し短くしておく安全策）
+          $totalMinutes = 350
+          $checkInterval = 10 # 10分ごとにログを出す
+          
+          Write-Host "============================================================"
+          Write-Host "  環境を $totalMinutes 分間（約6時間）維持します..."
+          Write-Host "  上記のURLからアクセスしてください。"
+          Write-Host "============================================================"
+
+          $elapsed = 0
+          while ($elapsed -lt $totalMinutes) {
+              Start-Sleep -Seconds ($checkInterval * 60)
+              $elapsed += $checkInterval
+              $remaining = $totalMinutes - $elapsed
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 環境維持中... 残り約 $remaining 分"
+          }
