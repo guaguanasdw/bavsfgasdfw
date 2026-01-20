@@ -25,6 +25,7 @@ jobs:
           certutil -decode cred.b64 "$env:USERPROFILE\.cloudflared\tunnel.json"
           echo $env:CLOUDFLARE_TUNNEL_CONFIGURATION_BASE64 | Out-File cfg.b64
           certutil -decode cfg.b64 "$env:USERPROFILE\.cloudflared\config.yml"
+        
         env:
           CLOUDFLARE_TUNNEL_CREDENTIAL_BASE64: ${{ secrets.CLOUDFLARE_TUNNEL_CREDENTIAL }}
           CLOUDFLARE_TUNNEL_CONFIGURATION_BASE64: ${{ secrets.CLOUDFLARE_TUNNEL_CONFIGURATION }}
@@ -32,9 +33,10 @@ jobs:
       - name: Show cloudflared version
         run: cloudflared -v
 
-      # Tunnel 起動
+      # Cloudflare Tunnel 起動（トンネルIDを明示的に渡す）
       - name: Start Cloudflare Tunnel
         run: |
+          # トンネルIDを直接渡す
           cloudflared tunnel --config "$env:USERPROFILE\.cloudflared\config.yml" run ${{ secrets.CLOUDFLARE_TUNNEL_ID }}
 
       # 任意のサービス起動例
