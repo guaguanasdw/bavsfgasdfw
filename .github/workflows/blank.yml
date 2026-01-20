@@ -1,4 +1,4 @@
-name: Windows Web RDP (Browser Access)
+name: Windows Web RDP (Fixed)
 
 on:
   workflow_dispatch: # 手動実行のみ
@@ -12,35 +12,61 @@ jobs:
     # WindowsホストでRDP有効化
     - name: Setup Host RDP
       run: |
-        # パスワード設定とログ出力
+        # パスワード設定
         $password = "P@ssw0rd123"
         Write-Host "================================================"
         Write-Host "WINDOWS PASSWORD: $password"
         Write-Host "================================================"
         
-        # ユーザー設定
         net user runneradmin $password
-        # NLA無効化（ブラウザ経由の接続を安定させるため）
         reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-        # RDP許可
         reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-        # FW許可
         netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
-    # Guacamoleの起動
-    - name: Start Guacamole (Web RDP)
+    # DockerをLinuxコンテナモードに切り替え（パス自動検出機能付き）
+    - name: Switch Docker to Linux
       run: |
-        # GitHub ActionsのWindows RunnerはデフォルトでLinuxコンテナが動作するようDocker Desktop設定がされている場合がありますが、
-        # 念のためSwitchコマンドでLinuxコンテナモードに強制切り替えします
-        & "C:\Program Files\Docker\Docker\DockerCli.exe" -SwitchLinuxEngine
+        Write-Host "Searching for DockerCli.exe..."
+        # 標準的なパスを試す
+        $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
         
-        # Dockerイメージのプル（初回は時間がかかります）
+        # なければ再帰的に探す
+        if (-not (Test-Path $dockerCli)) {
+            $dockerCli = (Get-ChildItem "C:\Program Files\Docker" -Recurse -Filter DockerCli.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+        }
+
+        if ($dockerCli -and (Test-Path $dockerCli)) {
+            Write-Host "Found Docker CLI at: $dockerCli"
+            # Linuxエンジンに切り替え
+            & $dockerCli -SwitchLinuxEngine
+            Write-Host "Docker switched to Linux Engine."
+            
+            # 切り替え完了を待機
+            Start-Sleep -Seconds 10
+        } else {
+            Write-Host "Warning: DockerCli.exe not found. Assuming default config..."
+        }
+
+    # Guacamoleの起動（環境変数で自動設定）
+    - name: Start Guacamole with Auto-Login
+      run: |
+        # イメージのプル（初回のみ）
         docker pull oznu/guacamole
         
-        # Guacamoleコンテナ起動
-        # ポート8080でWebインターフェースを公開
-        # ユーザー名: guacadmin / パスワード: guacadmin (デフォルト)
-        docker run -d --name guacamole -p 8080:8080 oznu/guacamole
+        # パスワード再取得
+        $password = "P@ssw0rd123"
+        
+        # コンテナ起動
+        # 環境変数を使うことで、ブラウザ開くだけでRDP接続されるように設定
+        docker run -d `
+          --name guacamole `
+          -p 8080:8080 `
+          -e RDP_HOST=host.docker.internal `
+          -e RDP_PORT=3389 `
+          -e RDP_USER=runneradmin `
+          -e RDP_PASSWORD=$password `
+          -e GUACAMOLE_HOME=/guacamole-home `
+          oznu/guacamole
 
     # Cloudflaredのダウンロードと実行
     - name: Start Cloudflare Tunnel
@@ -50,9 +76,10 @@ jobs:
         Write-Host "================================================"
         Write-Host "Starting Cloudflare Tunnel..."
         Write-Host "Access the URL below in your browser:"
+        Write-Host "It will log you in automatically."
         Write-Host "================================================"
         
-        # Guacamoleのポート8080をインターネットに公開
+        # Guacamoleのポート8080を公開
         .\cloudflared.exe tunnel --url http://localhost:8080
 
     # 終了防止
