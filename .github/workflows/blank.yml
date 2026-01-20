@@ -1,88 +1,168 @@
-name: Windows Web RDP (Fixed)
+name: Windows Browser Desktop via Cloudflare Tunnel
 
 on:
-  workflow_dispatch: # 手動実行のみ
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  web_rdp:
+  desktop:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 999
+
+    env:
+      VNC_PORT: 5900
+      NOVNC_PORT: 6080
 
     steps:
-    # WindowsホストでRDP有効化
-    - name: Setup Host RDP
-      run: |
-        # パスワード設定
-        $password = "P@ssw0rd123"
-        Write-Host "================================================"
-        Write-Host "WINDOWS PASSWORD: $password"
-        Write-Host "================================================"
-        
-        net user runneradmin $password
-        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-        netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+      - name: チェックアウト
+        uses: actions/checkout@v4
 
-    # DockerをLinuxコンテナモードに切り替え（パス自動検出機能付き）
-    - name: Switch Docker to Linux
-      run: |
-        Write-Host "Searching for DockerCli.exe..."
-        # 標準的なパスを試す
-        $dockerCli = "C:\Program Files\Docker\Docker\DockerCli.exe"
-        
-        # なければ再帰的に探す
-        if (-not (Test-Path $dockerCli)) {
-            $dockerCli = (Get-ChildItem "C:\Program Files\Docker" -Recurse -Filter DockerCli.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-        }
+      # UltraVNC のセットアップ（サイレントインストール）
+      - name: VNC サーバー (UltraVNC) をインストール
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
 
-        if ($dockerCli -and (Test-Path $dockerCli)) {
-            Write-Host "Found Docker CLI at: $dockerCli"
-            # Linuxエンジンに切り替え
-            & $dockerCli -SwitchLinuxEngine
-            Write-Host "Docker switched to Linux Engine."
-            
-            # 切り替え完了を待機
-            Start-Sleep -Seconds 10
-        } else {
-            Write-Host "Warning: DockerCli.exe not found. Assuming default config..."
-        }
+          $installerUrl = 'https://www.uvnc.com/download/ UltraVNC_1610_x64_Setup.exe'  # 必要に応じてバージョンを更新【turn11search9】
+          $installerPath = "$env:TEMP\UltraVNC_Setup.exe"
 
-    # Guacamoleの起動（環境変数で自動設定）
-    - name: Start Guacamole with Auto-Login
-      run: |
-        # イメージのプル（初回のみ）
-        docker pull oznu/guacamole
-        
-        # パスワード再取得
-        $password = "P@ssw0rd123"
-        
-        # コンテナ起動
-        # 環境変数を使うことで、ブラウザ開くだけでRDP接続されるように設定
-        docker run -d `
-          --name guacamole `
-          -p 8080:8080 `
-          -e RDP_HOST=host.docker.internal `
-          -e RDP_PORT=3389 `
-          -e RDP_USER=runneradmin `
-          -e RDP_PASSWORD=$password `
-          -e GUACAMOLE_HOME=/guacamole-home `
-          oznu/guacamole
+          Write-Host "Downloading UltraVNC installer..."
+          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
 
-    # Cloudflaredのダウンロードと実行
-    - name: Start Cloudflare Tunnel
-      run: |
-        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
-        
-        Write-Host "================================================"
-        Write-Host "Starting Cloudflare Tunnel..."
-        Write-Host "Access the URL below in your browser:"
-        Write-Host "It will log you in automatically."
-        Write-Host "================================================"
-        
-        # Guacamoleのポート8080を公開
-        .\cloudflared.exe tunnel --url http://localhost:8080
+          Write-Host "Installing UltraVNC (silent)..."
+          $args = @(
+            '/silent',
+            '/loadinf="default"',
+            '/norestart',
+            '/no_icl'
+          )
+          $proc = Start-Process -FilePath $installerPath -ArgumentList $args -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "::warning::UltraVNC installer exited with code $($proc.ExitCode)"
+          }
+          Write-Host "UltraVNC installation finished."
 
-    # 終了防止
-    - name: Keep Alive
-      if: false
-      run: while ($true) { Start-Sleep -Seconds 3600 }
+      # VNC パスワードを設定（レジストリ）し、サービスを起動
+      # ※ここでは VNC_PASSWORD をログに出すよう指示されているので、echo します。
+      - name: VNC パスワード設定＆サービス起動＆パスワードをログに出力
+        shell: pwsh
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not $env:VNC_PASSWORD) {
+            Write-Host "::error::VNC_PASSWORD secret is not set."
+            exit 1
+          }
+
+          # UltraVNC はレジストリ HKEY_LOCAL_MACHINE\SOFTWARE\UltraVNC にパスワード等を保存
+          $regPath = 'HKLM:\SOFTWARE\UltraVNC'
+          if (-not (Test-Path $regPath)) {
+            New-Item -Path $regPath -Force | Out-Null
+          }
+
+          # ここでは簡易的にパスワードを設定（UltraVNC 用の暗号化が必要だが、
+          # CI 用簡易構成として uvnc settings を使う例）
+          # 本格的にやるなら、UltraVNC の設定 GUI/export を利用して、
+          # レジストリファイルをレポに含めて import する方が確実です。
+          Set-ItemProperty -Path $regPath -Name 'passwd' -Value $env:VNC_PASSWORD -Type String
+          Set-ItemProperty -Path $regPath -Name 'passwd2' -Value $env:VNC_PASSWORD -Type String
+          Set-ItemProperty -Path $regPath -Name 'AllowProperty' -Value 1 -Type DWord
+
+          # UltraVNC サービス名は通常 "uvnc_service"
+          $serviceName = 'uvnc_service'
+          Write-Host "Starting VNC service $serviceName ..."
+          Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+          Get-Service -Name $serviceName | Select-Object Name, Status, StartType
+
+          # 要望通り、パスワードをログに出す（セキュリティ上のリスクは認識すること）
+          Write-Host "=========================================="
+          Write-Host "VNC password: ${env:VNC_PASSWORD}"
+          Write-Host "=========================================="
+
+      # noVNC のセットアップ
+      - name: noVNC をセットアップ
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $workDir = "$env:GITHUB_WORKSPACE\novnc"
+          New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+
+          $repo = 'https://github.com/novnc/noVNC.git'
+          # アーカイブをダウンロードして展開
+          $zipUrl = 'https://github.com/novnc/noVNC/archive/refs/heads/master.zip'
+          $zipPath = "$env:TEMP\novnc.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+
+          Expand-Archive -Path $zipPath -DestinationPath $workDir -Force
+
+          # 展開後のディレクトリ名が noVNC-master になる想定
+          $novncHome = "$workDir\noVNC-master"
+          Write-Host "noVNC home: $novncHome"
+
+          # noVNC は websockify を必要とする【turn11search10】
+          # CI なので手軽に pip で入れる
+          python -m pip install --upgrade pip
+          pip install websockify
+
+          # 環境変数にセット（後で使う）
+          echo "NOVNC_HOME=$novncHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "NOVNC_HOME=$novncHome"
+
+      # noVNC + websockify 起動（localhost:6080）
+      - name: noVNC (websockify) を起動
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $websockifyPort = $env:NOVNC_PORT
+          $vncHost = '127.0.0.1'
+          $vncPort = $env:VNC_PORT
+          $novncHome = $env:NOVNC_HOME
+
+          # noVNC を websockify 経由で提供
+          # websockify は noVNC リポジトリにバンドルされていることもありますが、
+          # pip 版にパスを通している前提で実行
+          $env:PATH += ";$env:APPDATA\Python\Python311\Scripts"  # バージョンは Runner 次第
+
+          $job = Start-Process -FilePath 'websockify' -ArgumentList @(
+            "$websockifyPort",
+            "$vncHost`:$vncPort",
+            '--web=' + $novncHome
+          ) -PassThru -NoNewWindow
+
+          # job ハンドルを保存してあとで止められるようにしてもよいが、
+          # ジョブ終了時にプロセスごと殲滅されるので簡易的に放置
+          $id = $job.Id
+          echo "WEBSOCKIFY_PID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
+          Start-Sleep -Seconds 3
+          Write-Host "websockify is listening on http://127.0.0.1:$websockifyPort"
+
+      # Cloudflare Tunnel (setup-cloudflared + TryCloudflare) で localhost:6080 を公開
+      - name: Cloudflare Tunnel (TryCloudflare) をセットアップ
+        uses: AnimMouse/setup-cloudflared@v2
+
+      - name: Cloudflare Quick Tunnel で noVNC をインターネットに公開
+        uses: AnimMouse/setup-cloudflared/tunnel@v2
+        with:
+          url: http://127.0.0.1:6080   # noVNC(websockify) ポート【turn18fetch0】
+
+      # 一定時間だけジョブを生かしておく（ブラウザで操作する時間）
+      # ここでは例として 55 分間待機（timeout-minutes と合わせて調整）
+      - name: デスクトップ操作用に待機
+        shell: pwsh
+        run: |
+          $waitMinutes = 999
+          Write-Host "Sleeping for $waitMinutes minutes so you can use the desktop..."
+          $seconds = $waitMinutes * 60
+          Start-Sleep -Seconds $seconds
+
+      # cloudflared のシャットダウン（ログを確認用に出力）【turn18fetch0】
+      - name: Cloudflare Tunnel のシャットダウン＆ログ表示
+        if: '! cancelled()'
+        uses: AnimMouse/setup-cloudflared/shutdown@v2
