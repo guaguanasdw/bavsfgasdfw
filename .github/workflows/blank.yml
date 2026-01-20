@@ -1,172 +1,57 @@
-name: Windows Browser Desktop (Fixed Quotes & Long Life)
+name: Expose Windows to Browser
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
+  push:
+    branches:
+      - main
 
 jobs:
-  desktop:
+  expose-windows:
     runs-on: windows-latest
-    # 最大6時間まで維持
-    timeout-minutes: 360
-
-    env:
-      VNC_PORT: 5900
-      NOVNC_PORT: 6080
 
     steps:
-      - name: チェックアウト
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v2
 
-      - name: UltraVNC をインストール
-        run: choco install ultravnc -y
+    - name: Set up Cloudflare Tunnel
+      run: |
+        # Cloudflare Tunnelのインストール
+        Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+        Rename-Item cloudflared.exe cloudflared
+        # cloudflaredを実行するために必要な環境変数
+        $Env:CLOUDFLARE_TUNNEL_SECRET = $env:CLOUDFLARE_TUNNEL_SECRET
+        ./cloudflared.exe --version
 
-      # パスワード設定のために createpassword ツールをダウンロード
-      - name: createpassword ツールを取得・展開
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $zipUrl = 'https://uvnc.eu/download/133/createpassword.zip'
-          $zipPath = "$env:TEMP\createpassword.zip"
-          
-          # インストール先の特定
-          $uvncDir = "${env:ProgramFiles}\uvnc bvba\UltraVNC"
-          if (-not (Test-Path $uvncDir)) {
-              $uvncDir = "${env:ProgramFiles}\UltraVNC"
-          }
-          
-          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath $uvncDir -Force
-          echo "UVNC_DIR=$uvncDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+    - name: Start VNC Server
+      run: |
+        # VNCサーバーをインストールして起動
+        choco install tightvnc
+        Start-Process -NoNewWindow -FilePath "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-run"
 
-      # UltraVNC をアプリモードで起動
-      - name: UltraVNC 起動＆パスワード設定
-        shell: pwsh
-        env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
+    - name: Expose via Cloudflare Tunnel
+      run: |
+        # Cloudflare Tunnelの設定を開始
+        echo "Starting Cloudflare Tunnel"
+        cloudflared tunnel --url vnc://localhost:5900 &
+        # クラウドフレアトンネルをブラウザ上でアクセスできるようにする
+        sleep 10  # Tunnelが安定するまで待機
 
-          # パスワードが未設定なら "password" を使用
-          $vncPass = if ($env:VNC_PASSWORD) { $env:VNC_PASSWORD } else { "password" }
+    - name: Output Tunnel URL and VNC Password
+      run: |
+        # ここでパスワードを表示する
+        $vncPassword = "your-secure-password"
+        Write-Host "VNC Server is running on : vnc://localhost:5900"
+        Write-Host "Cloudflare Tunnel URL: https://your-cloudflare-tunnel-url"
+        Write-Host "VNC Password: $vncPassword"
 
-          $uvncDir = $env:UVNC_DIR
-          $createpassword = "$uvncDir\createpassword.exe"
-          $winvnc = "$uvncDir\winvnc.exe"
-
-          # ultravnc.ini のあるフォルダで createpassword を実行
-          Push-Location $uvncDir
-          try {
-            & $createpassword $vncPass
-          }
-          finally {
-            Pop-Location
-          }
-
-          # winvnc.exe をアプリモードで起動（-run）
-          $proc = Start-Process -FilePath $winvnc -ArgumentList '-run' -PassThru
-          echo "WINVNC_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-          Write-Host "UltraVNC started. Password: $vncPass"
-
-      # noVNC ＋ websockify のセットアップ
-      - name: noVNC をセットアップ
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $workDir = "$env:GITHUB_WORKSPACE\novnc"
-          New-Item -ItemType Directory -Force -Path $workDir | Out-Null
-          $zipUrl = 'https://github.com/novnc/noVNC/archive/refs/heads/master.zip'
-          $zipPath = "$env:TEMP\novnc.zip"
-          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath $workDir -Force
-          echo "NOVNC_HOME=$workDir\noVNC-master" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
-          python -m pip install websockify
-
-      # websockify 起動
-      - name: noVNC (websockify) を起動
-        shell: pwsh
-        run: |
-          $port = $env:NOVNC_PORT
-          $vncTarget = "127.0.0.1:$env:VNC_PORT"
-          $webDir = $env:NOVNC_HOME
-          Start-Process -FilePath 'websockify' -ArgumentList @("$port", "$vncTarget", "--web=$webDir") -NoNewWindow
-          Write-Host "websockify started on http://127.0.0.1:$port"
-
-      # Cloudflare Tunnel バイナリのセットアップ
-      - name: Cloudflare Tunnel バイナリを準備
-        uses: AnimMouse/setup-cloudflared@v2
-
-      # Cloudflare Tunnel 手動起動 & URL抽出＆巨大表示
-      # ※文字列エラーを防ぐため、単一引用符 ' を使用し、変数は -f で埋め込む形式に変更
-      - name: Cloudflare Tunnel 起動 & URLを表示
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          
-          # バックグラウンドで cloudflared を起動し、ログをファイルに吐かせる
-          $logFile = "$env:TEMP\cf-tunnel.log"
-          Start-Process -FilePath 'cloudflared' -ArgumentList 'tunnel --url http://127.0.0.1:6080' -RedirectStandardOutput $logFile -RedirectStandardError $logFile -NoNewWindow
-
-          # URLが出力されるまで最大15秒待機
-          Write-Host 'Waiting for Cloudflare Tunnel URL...'
-          $maxWait = 15
-          $url = $null
-          for ($i = 0; $i -lt $maxWait; $i++) {
-              Start-Sleep -Seconds 1
-              $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-              if ($content -match 'https://[a-zA-Z0-9\-\.]+trycloudflare\.com') {
-                  $url = $matches[0]
-                  break
-              }
-          }
-
-          if ($url) {
-              # 見やすいように巨大に表示（引用符エラー回避のため単一引用符と-f演算子を使用）
-              Write-Host ''
-              Write-Host '###########################################################################' -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host '#   ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★   ' -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host '#   Windows デスクトップへの接続情報                                       #' -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host ('#   接続URL (URL) : {0}                                                       #' -f $url) -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host '#   パスワード (Password) :                                                 #' -ForegroundColor Green
-              Write-Host '#   password                                                                #' -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host '#   ※ 上記のURLをクリックするとブラウザで操作できます                      #' -ForegroundColor Green
-              Write-Host '#                                                                         #' -ForegroundColor Green
-              Write-Host '###########################################################################' -ForegroundColor Green
-              Write-Host ''
-              
-              # Job Summaryにも表示
-              echo '### 🖥️ Windows Remote Desktop' >> $env:GITHUB_STEP_SUMMARY
-              echo ('**URL:** {0}' -f $url) >> $env:GITHUB_STEP_SUMMARY
-              echo '**Password:** `password`' >> $env:GITHUB_STEP_SUMMARY
-          } else {
-              # エラーメッセージも単一引用符で囲む
-              Write-Host '::error::Cloudflare Tunnel URLの取得に失敗しました。ログを確認してください。'
-              Get-Content $logFile | Write-Host
-          }
-
-      # 長時間維持のための待機ループ
-      - name: 環境維持（最大6時間まで待機）
-        shell: pwsh
-        run: |
-          $totalMinutes = 350
-          $checkInterval = 10 
-          
-          Write-Host '============================================================'
-          Write-Host ('  環境を {0} 分間（約6時間）維持します...' -f $totalMinutes)
-          Write-Host '  上記のURLからアクセスしてください。'
-          Write-Host '============================================================'
-
-          $elapsed = 0
-          while ($elapsed -lt $totalMinutes) {
-              Start-Sleep -Seconds ($checkInterval * 60)
-              $elapsed += $checkInterval
-              $remaining = $totalMinutes - $elapsed
-              Write-Host ('[{0}] 環境維持中... 残り約 {1} 分' -f (Get-Date -Format 'HH:mm:ss'), $remaining)
-          }
+    - name: Expose noVNC Web Interface
+      run: |
+        # noVNCをセットアップしてブラウザからVNCにアクセス可能にする
+        choco install novnc
+        cd "C:\Program Files\novnc"
+        Start-Process -NoNewWindow -FilePath "C:\Program Files\novnc\start.bat" -ArgumentList "localhost:5900"
+        
+    - name: Keep the Action Alive
+      run: |
+        # 永続的にプロセスを維持
+        while ($true) { Start-Sleep -Seconds 3600 }
